@@ -202,7 +202,7 @@ impl CursorVfx for PointHighlight {
         paint.set_color(color);
 
         let cursor_height = grid_renderer.grid_scale.height();
-        let size = 3.0 * cursor_height;
+        let size = 3.0 * cursor_height * settings.vfx_particle_size;
         let radius = self.t * size;
         let hr = radius * 0.5;
         let rect = Rect::from_xywh(
@@ -218,12 +218,12 @@ impl CursorVfx for PointHighlight {
             }
             HighlightMode::Ripple => {
                 paint.set_style(Style::Stroke);
-                paint.set_stroke_width(cursor_height * 0.2);
+                paint.set_stroke_width(cursor_height * 0.2 * settings.vfx_particle_size);
                 canvas.draw_oval(rect, &paint);
             }
             HighlightMode::Wireframe => {
                 paint.set_style(Style::Stroke);
-                paint.set_stroke_width(cursor_height * 0.2);
+                paint.set_stroke_width(cursor_height * 0.2 * settings.vfx_particle_size);
                 canvas.draw_rect(rect, &paint);
             }
         }
@@ -399,7 +399,7 @@ impl CursorVfx for ParticleTrail {
         match self.trail_mode {
             TrailMode::Torpedo | TrailMode::Railgun => {
                 paint.set_style(Style::Stroke);
-                paint.set_stroke_width(font_dimensions.height * 0.2);
+                paint.set_stroke_width(font_dimensions.height * 0.2 * settings.vfx_particle_size);
             }
             _ => {}
         }
@@ -414,8 +414,10 @@ impl CursorVfx for ParticleTrail {
             paint.set_color(color);
 
             let radius = match self.trail_mode {
-                TrailMode::Torpedo | TrailMode::Railgun => font_dimensions.width * 0.5 * lifetime,
-                TrailMode::PixieDust => font_dimensions.width * 0.2,
+                TrailMode::Torpedo | TrailMode::Railgun => {
+                    font_dimensions.width * 0.5 * lifetime * settings.vfx_particle_size
+                }
+                TrailMode::PixieDust => font_dimensions.width * 0.2 * settings.vfx_particle_size,
             };
 
             let hr = radius * 0.5;

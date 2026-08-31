@@ -9,6 +9,7 @@ pub mod progress_bar;
 mod rendered_layer;
 pub mod rendered_window;
 mod vsync;
+pub mod window_transition;
 
 #[cfg(target_os = "windows")]
 pub mod d3d;
@@ -112,6 +113,11 @@ pub struct RendererSettings {
     text_gamma: f32,
     text_contrast: f32,
     experimental_layer_grouping: bool,
+    float_transition_enabled: bool,
+    float_transition_spring: window_transition::SpringStyle,
+    float_transition_open_length: f32,
+    float_transition_close_length: f32,
+    float_transition_bounce_strength: f32,
     pixel_geometry: PixelGeometry,
 }
 
@@ -135,6 +141,11 @@ impl Default for RendererSettings {
             text_gamma: 0.0,
             text_contrast: 0.5,
             experimental_layer_grouping: false,
+            float_transition_enabled: true,
+            float_transition_spring: window_transition::SpringStyle::default(),
+            float_transition_open_length: 0.2,
+            float_transition_close_length: 0.15,
+            float_transition_bounce_strength: 0.2,
             pixel_geometry: PixelGeometry::default(),
         }
     }
@@ -480,6 +491,10 @@ impl Renderer {
         let mut animating =
             windows.fold(false, |acc, window| acc | window.animate(&settings, grid_rect, dt));
 
+        // Drop windows whose close transition has finished; they stay invisible
+        // until then (see WindowTransition::transform).
+        self.rendered_windows.retain(|_, window| !window_transition::close_finished(window));
+
         let windows = &self.rendered_windows;
         let grid_scale = self.grid_renderer.grid_scale;
         self.cursor_renderer.update_cursor_destination(grid_scale, windows);
@@ -525,7 +540,7 @@ impl Renderer {
         };
 
         for draw_command in batch {
-            self.handle_draw_command(draw_command, &mut result);
+            self.handle_draw_command(draw_command, &mut result, &settings);
             tracy_named_frame!("neovim draw batch processed");
         }
 
@@ -569,22 +584,71 @@ impl Renderer {
             .for_each(|(_, w)| w.prepare_lines(&mut self.grid_renderer, opacity, force));
     }
 
-    fn handle_draw_command(&mut self, draw_command: DrawCommand, result: &mut DrawCommandResult) {
+    fn handle_draw_command(
+        &mut self,
+        draw_command: DrawCommand,
+        result: &mut DrawCommandResult,
+        settings: &RendererSettings,
+    ) {
         match draw_command {
             DrawCommand::Window { grid_id, command: WindowDrawCommand::Close } => {
-                self.rendered_windows.remove(&grid_id);
+                let keep = self.rendered_windows.get_mut(&grid_id).is_some_and(|window| {
+                    let is_floating = window.anchor_info.is_some();
+                    let is_message = matches!(window.window_type, WindowType::Message { .. });
+                    window_transition::request_close(window, is_floating, is_message, settings)
+                });
+                if !keep {
+                    self.rendered_windows.remove(&grid_id);
+                }
             }
             DrawCommand::Window { grid_id, command } => {
                 match self.rendered_windows.entry(grid_id) {
                     Entry::Occupied(mut occupied_entry) => {
                         let rendered_window = occupied_entry.get_mut();
+                        let was_valid = rendered_window.valid;
+                        let was_hidden = rendered_window.hidden;
+                        let is_floating = rendered_window.anchor_info.is_some();
+                        let is_message =
+                            matches!(rendered_window.window_type, WindowType::Message { .. });
+                        window_transition::on_position(
+                            rendered_window,
+                            was_valid,
+                            is_floating,
+                            is_message,
+                            settings,
+                        );
+                        window_transition::on_show(
+                            rendered_window,
+                            was_hidden,
+                            is_floating,
+                            is_message,
+                            settings,
+                        );
                         rendered_window.handle_window_draw_command(command);
                     }
                     Entry::Vacant(vacant_entry) => match command {
                         WindowDrawCommand::Position { .. }
                         | WindowDrawCommand::ViewportMargins { .. } => {
                             let mut new_window = RenderedWindow::new(grid_id);
+                            let is_floating = matches!(
+                                &command,
+                                WindowDrawCommand::Position { anchor_info: Some(_), .. }
+                            );
+                            let is_message = matches!(
+                                &command,
+                                WindowDrawCommand::Position {
+                                    window_type: WindowType::Message { .. },
+                                    ..
+                                }
+                            );
                             new_window.handle_window_draw_command(command);
+                            window_transition::on_position(
+                                &mut new_window,
+                                false,
+                                is_floating,
+                                is_message,
+                                settings,
+                            );
                             vacant_entry.insert(new_window);
                         }
                         _ => {

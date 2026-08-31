@@ -13,7 +13,10 @@ use crate::{
     units::{GridScale, PixelRect, to_skia_rect},
 };
 
-use super::{RenderedWindow, RendererSettings, WindowDrawDetails, is_rightmost_window_edge};
+use super::{
+    RenderedWindow, RendererSettings, WindowDrawDetails, is_rightmost_window_edge,
+    window_transition,
+};
 
 struct LayerWindow<'w> {
     window: &'w mut RenderedWindow,
@@ -69,8 +72,24 @@ impl FloatingLayer<'_> {
         let (draw_clip, draw_bound_rect) =
             self.build_draw_clip_and_bounds(silhouette.clone(), bound_rect, &regions, grid_scale);
         let has_transparency = self.windows.iter().any(|window| window.has_transparency());
+        // Transition snapshot: windows fading in/out get their own alpha
+        // scope below; the shared shadow and backdrop blur fade along via
+        // the layer minimum alpha.
+        let alphas: Vec<Option<f32>> =
+            self.windows.iter().map(|window| window.transition.active_alpha()).collect();
+        let transitioning: Vec<bool> =
+            self.windows.iter().map(|window| window.transition.is_transitioning()).collect();
+        let layer_alpha = window_transition::layer_alpha(&alphas);
 
-        self._draw_shadow(root_canvas, &silhouette, settings);
+        let shadow_bounds = Rect::new(
+            draw_bound_rect.left - settings.floating_z_height * 4.0,
+            draw_bound_rect.top - settings.floating_z_height * 4.0,
+            draw_bound_rect.right + settings.floating_z_height * 4.0,
+            draw_bound_rect.bottom + settings.floating_z_height * 4.0,
+        );
+        window_transition::with_alpha_layer(root_canvas, layer_alpha, &shadow_bounds, |canvas| {
+            self._draw_shadow(canvas, &silhouette, settings);
+        });
 
         root_canvas.save();
         root_canvas.clip_path(&draw_clip, None, Some(false));
@@ -83,8 +102,17 @@ impl FloatingLayer<'_> {
                 None,
             )
         {
-            let paint =
-                Paint::default().set_anti_alias(false).set_blend_mode(BlendMode::Src).to_owned();
+            // While a window in this layer is transitioning, fade the blur
+            // with SrcOver instead of Src: Src with alpha < 1 REPLACES the
+            // destination pixels with semi-transparent ones, punching holes
+            // in the window surface alpha (visible e.g. as the compositor's
+            // window background color flashing through on Wayland).
+            let mut paint = Paint::default().set_anti_alias(false).to_owned();
+            if layer_alpha < 1.0 {
+                paint.set_blend_mode(BlendMode::SrcOver).set_alpha_f(layer_alpha);
+            } else {
+                paint.set_blend_mode(BlendMode::Src);
+            }
             let save_layer_rec =
                 SaveLayerRec::default().backdrop(&blur).bounds(&draw_bound_rect).paint(&paint);
             root_canvas.save_layer(&save_layer_rec);
@@ -98,13 +126,38 @@ impl FloatingLayer<'_> {
 
         root_canvas.save_layer(&save_layer_rec);
         let background_paint = Paint::default().set_color(default_background).to_owned();
-        root_canvas.draw_path(&draw_clip, &background_paint);
+
+        // The layer background fill covers all windows at once; windows that
+        // are mid-transition are excluded here and instead fill their own
+        // silhouette inside their alpha scope below, so the background fades
+        // and scales together with the window content.
+        let mut fill_clip = draw_clip.clone();
+        for (i, is_transitioning) in transitioning.iter().enumerate() {
+            if *is_transitioning {
+                let own =
+                    rect_to_round_rect_path(to_skia_rect(&pixel_regions[i]), settings, grid_scale);
+                if let Some(difference) = fill_clip.op(&own, PathOp::Difference) {
+                    fill_clip = difference;
+                }
+            }
+        }
         let mut ret = vec![];
 
         (0..self.windows.len()).for_each(|i| {
             let window = &mut self.windows[i];
+            let _guard = window_transition::apply_guard(
+                root_canvas,
+                window.transition.transform(),
+                pixel_regions[i],
+            );
+            if transitioning[i] {
+                let own =
+                    rect_to_round_rect_path(to_skia_rect(&pixel_regions[i]), settings, grid_scale);
+                root_canvas.draw_path(&own, &background_paint);
+            }
             window.draw_background_surface(root_canvas, pixel_regions[i], grid_scale);
             window.draw_foreground_surface(root_canvas, pixel_regions[i], grid_scale);
+            window.draw_trailing_background_surface(root_canvas, regions[i], grid_scale);
             ret.push(WindowDrawDetails {
                 id: window.id,
                 region: regions[i],
@@ -112,10 +165,6 @@ impl FloatingLayer<'_> {
                 window_type: window.window_type,
             });
         });
-
-        for (window, region) in self.windows.iter().zip(regions.iter().copied()) {
-            window.draw_trailing_background_surface(root_canvas, region, grid_scale);
-        }
 
         root_canvas.restore();
 

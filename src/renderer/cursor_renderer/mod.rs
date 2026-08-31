@@ -66,6 +66,7 @@ pub struct CursorSettings {
     vfx_particle_speed: f32,
     vfx_particle_phase: f32,
     vfx_particle_curl: f32,
+    vfx_particle_size: f32,
 }
 
 impl Default for CursorSettings {
@@ -88,6 +89,7 @@ impl Default for CursorSettings {
             vfx_particle_speed: 10.0,
             vfx_particle_phase: 1.5,
             vfx_particle_curl: 1.0,
+            vfx_particle_size: 1.0,
         }
     }
 }

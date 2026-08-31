@@ -9,7 +9,7 @@ use crate::{
     cmd_line::CmdLineSettings,
     editor::{AnchorInfo, Line, LineFragment, SortOrder, WindowType},
     profiling::{tracy_plot, tracy_zone},
-    renderer::{GridRenderer, RendererSettings, animation_utils::*},
+    renderer::{GridRenderer, RendererSettings, animation_utils::*, window_transition},
     settings::Settings,
     units::{GridPos, GridRect, GridScale, GridSize, PixelPos, PixelRect, PixelVec, to_skia_rect},
     utils::RingBuffer,
@@ -86,7 +86,7 @@ struct TrailingFillRect {
 
 pub struct RenderedWindow {
     pub id: u64,
-    valid: bool,
+    pub(crate) valid: bool,
     pub hidden: bool,
     pub anchor_info: Option<AnchorInfo>,
     pub window_type: WindowType,
@@ -105,6 +105,8 @@ pub struct RenderedWindow {
 
     pub scroll_animation: CriticallyDampedSpringAnimation,
     pub scroll_animation_delta: f32,
+
+    pub(crate) transition: window_transition::WindowTransition,
 }
 
 #[derive(Clone, Debug)]
@@ -146,6 +148,7 @@ impl RenderedWindow {
 
             scroll_animation: CriticallyDampedSpringAnimation::new(),
             scroll_animation_delta: 0.0,
+            transition: window_transition::WindowTransition::new(),
         }
     }
 
@@ -243,6 +246,8 @@ impl RenderedWindow {
         if scrolling {
             tracy_plot!("Scroll position {}", self.scroll_animation.position.into());
         }
+
+        animating |= window_transition::update(self, dt);
 
         animating
     }
