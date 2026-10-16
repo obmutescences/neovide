@@ -4,6 +4,12 @@ On startup, Neovide registers some commands for interacting
 with the os and platform window. These are neovim commands
 accessible via `:{command name}`.
 
+## Open Documentation
+
+Run `:NeovideHelp` to open the [documentation](https://neovide.dev/) in your browser.
+
+The browser opens on the machine running neovim. Remote sessions use that machine URL handler.
+
 ## Register/Unregister Right Click
 
 On windows you can register a right click context menu item
@@ -18,6 +24,12 @@ window containing Neovide to the front and activate it. This
 is useful for tools like neovim_remote which can manipulate
 neovim remotely or if long running tasks would like to
 activate the Neovide window after finishing.
+
+On Wayland, this requests attention through `xdg_activation_v1` instead of
+forcing keyboard focus. The compositor decides whether to focus the window
+or show a notification. For example, GNOME may show a notification when the
+command is sent from a terminal. Compositors without this protocol cannot
+make the request.
 
 ## Force Click (macOS) (Available since 0.16.0)
 

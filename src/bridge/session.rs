@@ -11,7 +11,12 @@ use std::{
 };
 
 use anyhow::Context;
-use nvim_rs::{Handler, error::LoopError, neovim::Neovim};
+use nvim_rs::{
+    Handler, Value, call_args,
+    error::{CallError, LoopError},
+    neovim::Neovim,
+    rpc::IntoVal,
+};
 #[cfg(not(target_os = "windows"))]
 use tokio::process::Child;
 use tokio::{
@@ -27,6 +32,20 @@ pub type NeovimWriter = Box<dyn futures::AsyncWrite + Send + Unpin + 'static>;
 
 type BoxedReader = Box<dyn AsyncRead + Send + Unpin + 'static>;
 type BoxedWriter = Box<dyn AsyncWrite + Send + Unpin + 'static>;
+
+#[cfg(any(target_os = "windows", test))]
+fn normalize_windows_pipe_address(address: String) -> String {
+    const PIPE_PREFIX: &str = r"\\.\pipe\";
+    const FORWARD_SLASH_PIPE_PREFIX: &str = "//./pipe/";
+
+    if address.starts_with(PIPE_PREFIX) {
+        address
+    } else if let Some(name) = address.strip_prefix(FORWARD_SLASH_PIPE_PREFIX) {
+        format!("{PIPE_PREFIX}{name}")
+    } else {
+        format!("{PIPE_PREFIX}{address}")
+    }
+}
 
 pub struct NeovimSession {
     pub neovim: Neovim<NeovimWriter>,
@@ -48,6 +67,7 @@ impl NeovimSession {
     pub async fn new(
         instance: NeovimInstance,
         handler: impl Handler<Writer = NeovimWriter>,
+        channel_config: Option<&[(Value, Value)]>,
     ) -> anyhow::Result<Self> {
         // This needs to be done before the process is spawned, since the file descriptors are
         // inherited on unix-like systems
@@ -86,6 +106,18 @@ impl NeovimSession {
             }
             Ok((neovim, io)) => {
                 let io_handle = spawn(io);
+
+                if let Some(channel_config) = channel_config {
+                    let restored = neovim
+                        .call("nvim_chan_set", call_args![0, Value::Map(channel_config.to_vec())])
+                        .await
+                        .and_then(|response| response.map_err(Box::<CallError>::from));
+
+                    if let Err(error) = restored {
+                        io_handle.abort();
+                        return Err(error).context("Could not restore Neovim channel properties");
+                    }
+                }
 
                 Ok(Self {
                     neovim,
@@ -193,12 +225,7 @@ impl NeovimInstance {
 
             #[cfg(windows)]
             {
-                // Fixup the address if the pipe on windows does not start with \\.\pipe\.
-                let address = if address.starts_with("\\\\.\\pipe\\") {
-                    address
-                } else {
-                    format!("\\\\.\\pipe\\{address}")
-                };
+                let address = normalize_windows_pipe_address(address);
                 Ok(Self::split(
                     tokio::net::windows::named_pipe::ClientOptions::new().open(address)?,
                 ))
@@ -244,5 +271,29 @@ impl NeovimInstance {
     ) -> (BoxedReader, BoxedWriter) {
         let (reader, writer) = split(stream);
         (Box::new(reader), Box::new(writer))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_windows_pipe_address;
+
+    #[test]
+    fn preserves_canonical_windows_pipe_address() {
+        let address = r"\\.\pipe\nvim.123".to_string();
+        assert_eq!(normalize_windows_pipe_address(address.clone()), address);
+    }
+
+    #[test]
+    fn normalizes_neovim_forward_slash_pipe_address() {
+        assert_eq!(
+            normalize_windows_pipe_address("//./pipe/nvim.123".to_string()),
+            r"\\.\pipe\nvim.123"
+        );
+    }
+
+    #[test]
+    fn prefixes_bare_windows_pipe_name() {
+        assert_eq!(normalize_windows_pipe_address("nvim.123".to_string()), r"\\.\pipe\nvim.123");
     }
 }

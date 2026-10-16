@@ -48,20 +48,14 @@ pub use command::{OpenArgs, OpenMode, create_blocking_nvim_command};
 pub use events::*;
 pub use restart::RestartDetails;
 pub use session::NeovimWriter;
-#[cfg(target_os = "macos")]
-pub use ui_commands::send_or_queue_file_drop;
 pub use ui_commands::{
-    ParallelCommand, SerialCommand, require_active_handler, send_ui, set_active_route_handler,
+    ParallelCommand, SerialCommand, get_active_handler, send_ui, set_active_route_handler,
     start_ui_command_handler, unregister_route_handler,
 };
+#[cfg(target_os = "macos")]
+pub use ui_commands::{require_active_handler, send_or_queue_file_drop};
 
-const NEOVIM_REQUIRED_VERSION: (u64, u64, u64) = (0, 10, 0);
-
-fn supports_startup_message_capture(version: &api_info::ApiVersion) -> bool {
-    // It's needed to keep the built-in message UI on nvim 0.10/0.11. since its external cmdline
-    // startup prompts can block before we have a rendered window.
-    version.has_version(0, 12, 0, None) || version.has_version(0, 12, 0, Some(0))
-}
+const NEOVIM_REQUIRED_VERSION: (u64, u64, u64) = (0, 12, 0);
 
 macro_rules! nvim_dict {
     ( $( $key:expr => $value:expr ),* $(,)? ) => {
@@ -183,15 +177,19 @@ async fn create_neovim_session(
 ) -> Result<NeovimSession> {
     let neovim_instance = neovim_instance(settings.as_ref(), restart_details, cwd, mode).await?;
     #[allow(unused_mut)]
-    let mut session = NeovimSession::new(neovim_instance, handler.clone())
-        .await
-        .context("Could not locate or start neovim process")?;
+    let mut session = NeovimSession::new(
+        neovim_instance,
+        handler.clone(),
+        restart_details.and_then(|details| details.channel_config.as_deref()),
+    )
+    .await
+    .context("Could not establish Neovim session")?;
 
     let api_information = get_api_information(&session.neovim).await?;
     info!("Neovide registered to nvim with channel id {}", api_information.channel);
 
     let (major, minor, patch) = NEOVIM_REQUIRED_VERSION;
-    if !api_information.version.has_version(major, minor, patch, None) {
+    if !api_information.version.has_version(major, minor, patch, Some(0)) {
         let found = api_information.version.string;
         bail!(
             "Neovide requires nvim version {major}.{minor}.{patch} or higher, but {found} was detected. Download the latest version here https://github.com/neovim/neovim/wiki/Installing-Neovim"
@@ -224,8 +222,7 @@ async fn create_neovim_session(
     settings.read_initial_values(&session.neovim).await?;
     set_background_if_allowed(background, &session.neovim).await;
 
-    let capture_startup_messages = cmdline_settings.startup_message_capture
-        && supports_startup_message_capture(&api_information.version);
+    let capture_startup_messages = cmdline_settings.startup_message_capture;
     if capture_startup_messages {
         let pre_attach_cmdheight = session
             .neovim
