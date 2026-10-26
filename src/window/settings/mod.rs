@@ -1,10 +1,13 @@
 use rmpv::Value;
 
 use crate::error_msg;
-use crate::settings::*;
 
-#[cfg(target_os = "macos")]
-pub use crate::platform::macos::settings::*;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg_attr(target_os = "macos", path = "macos.rs")]
+#[cfg_attr(target_os = "windows", path = "windows.rs")]
+pub mod platform;
+
+use crate::settings::*;
 
 #[derive(Clone, SettingGroup, PartialEq)]
 pub struct WindowSettings {
@@ -34,13 +37,15 @@ pub struct WindowSettings {
     pub window_blurred: bool,
     pub message_area_drag_selection: bool,
     #[cfg(target_os = "windows")]
-    pub corner_preference: CornerPreference,
+    pub corner_preference: platform::CornerPreference,
     #[cfg(target_os = "macos")]
     pub input_macos_alt_is_meta: bool,
     #[cfg(target_os = "macos")]
-    pub input_macos_option_key_is_meta: OptionAsMeta,
+    pub input_macos_option_key_is_meta: platform::OptionAsMeta,
     #[cfg(target_os = "macos")]
     pub macos_simple_fullscreen: bool,
+    #[cfg(target_os = "macos")]
+    pub system_scrollbar: bool,
     #[cfg(target_os = "macos")]
     pub highlight_matching_pair: bool,
     #[cfg(target_os = "windows")]
@@ -84,13 +89,15 @@ impl Default for WindowSettings {
             window_blurred: false,
             message_area_drag_selection: true,
             #[cfg(target_os = "windows")]
-            corner_preference: CornerPreference::Default,
+            corner_preference: platform::CornerPreference::Default,
             #[cfg(target_os = "macos")]
             input_macos_alt_is_meta: false,
             #[cfg(target_os = "macos")]
-            input_macos_option_key_is_meta: OptionAsMeta::None,
+            input_macos_option_key_is_meta: platform::OptionAsMeta::None,
             #[cfg(target_os = "macos")]
             macos_simple_fullscreen: false,
+            #[cfg(target_os = "macos")]
+            system_scrollbar: false,
             #[cfg(target_os = "macos")]
             highlight_matching_pair: false,
             #[cfg(target_os = "windows")]
@@ -142,63 +149,6 @@ impl From<ThemeSettings> for Value {
             ThemeSettings::Dark => Value::from("dark"),
             ThemeSettings::Light => Value::from("light"),
             ThemeSettings::BgColor => Value::from("bg_color"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(target_os = "windows")]
-pub enum CornerPreference {
-    Default,
-    Round,
-    RoundSmall,
-    DoNotRound,
-}
-
-#[cfg(target_os = "windows")]
-impl ParseFromValue for CornerPreference {
-    fn parse_from_value(&mut self, value: Value) {
-        if value.is_str() {
-            *self = match value.as_str().unwrap() {
-                "default" => CornerPreference::Default,
-                "round" => CornerPreference::Round,
-                "round_small" => CornerPreference::RoundSmall,
-                "do_not_round" => CornerPreference::DoNotRound,
-                value => {
-                    error_msg!(
-                        "Setting CornerPreference expected one of `default`, `do_not_round`, `round`, `round_small`, but received {value:?}"
-                    );
-                    return;
-                }
-            };
-        } else {
-            error_msg!("Setting CornerPreference expected string, but received {value:?}");
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl From<CornerPreference> for Value {
-    fn from(value: CornerPreference) -> Self {
-        match value {
-            CornerPreference::Default => Value::from("default"),
-            CornerPreference::Round => Value::from("round"),
-            CornerPreference::RoundSmall => Value::from("round_small"),
-            CornerPreference::DoNotRound => Value::from("do_not_round"),
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl From<CornerPreference> for winit::platform::windows::CornerPreference {
-    fn from(value: CornerPreference) -> Self {
-        use winit::platform::windows::CornerPreference as WinitCornerPreference;
-
-        match value {
-            CornerPreference::Default => WinitCornerPreference::Default,
-            CornerPreference::Round => WinitCornerPreference::Round,
-            CornerPreference::RoundSmall => WinitCornerPreference::RoundSmall,
-            CornerPreference::DoNotRound => WinitCornerPreference::DoNotRound,
         }
     }
 }

@@ -1,8 +1,5 @@
-use windows::Win32::{
-    System::Console::{ATTACH_PARENT_PROCESS, AttachConsole},
-    UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext},
-};
-use windows_registry::{CURRENT_USER, Result};
+use windows_registry::CURRENT_USER;
+use windows_registry::Result;
 
 use crate::error_msg;
 
@@ -66,19 +63,5 @@ pub fn register_right_click() {
 pub fn unregister_right_click() {
     if unregister_rightclick().is_err() {
         error_msg!("Could not remove context menu items. Possibly already removed.");
-    }
-}
-
-pub fn windows_fix_dpi() {
-    unsafe {
-        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
-            .expect("Failed to set DPI awareness!");
-    }
-}
-
-pub fn windows_attach_to_console() {
-    // Attach to parent console tip found here: https://github.com/rust-lang/rust/issues/67159#issuecomment-987882771
-    unsafe {
-        AttachConsole(ATTACH_PARENT_PROCESS).ok();
     }
 }

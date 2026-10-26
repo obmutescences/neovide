@@ -1,32 +1,41 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, LazyLock, Mutex},
-};
-
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::Mutex;
 #[cfg(target_os = "macos")]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::Ordering;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
+use anyhow::Result;
 use indoc::indoc;
 use log::trace;
-use nvim_rs::{Neovim, call_args, error::CallError, rpc::model::IntoVal};
+use nvim_rs::Neovim;
+use nvim_rs::call_args;
+use nvim_rs::error::CallError;
+use nvim_rs::rpc::model::IntoVal;
 use rmpv::Value;
 use strum::AsRefStr;
 use tokio::sync::mpsc::unbounded_channel;
 
-use super::{
-    NeovimHandler, RedrawEvent, Settings, StartupMessage, set_background_if_allowed,
-    show_error_message, show_startup_message,
-};
+use super::NeovimHandler;
+use super::RedrawEvent;
+use super::Settings;
+use super::StartupMessage;
+use super::set_background_if_allowed;
+use super::show_error_message;
+use super::show_startup_message;
+use crate::bridge::NeovimWriter;
+use crate::bridge::nvim_dict;
+use crate::cmd_line::CmdLineSettings;
 #[cfg(feature = "profiling")]
 use crate::profiling::scroll_tick_count;
-use crate::{
-    bridge::{NeovimWriter, nvim_dict},
-    cmd_line::CmdLineSettings,
-    profiling::tracy_dynamic_zone,
-    utils::handle_wslpaths,
-    window::RouteId,
-};
+#[cfg(all(feature = "profiling", target_os = "macos"))]
+use crate::profiling::scroll_to_exec_lua_latency;
+use crate::profiling::tracy_dynamic_zone;
+use crate::utils::handle_wslpaths;
+use crate::window::RouteId;
 
 // nvim_get_option_info2 reports this when an option
 // was last set through an API client, which is how ui_attach applies ext_messages.
@@ -60,9 +69,7 @@ static PENDING_FILE_DROPS: LazyLock<Mutex<Vec<PendingFileDrop>>> =
 #[cfg(target_os = "macos")]
 static FILE_DROP_HANDLER_READY: AtomicBool = AtomicBool::new(false);
 
-pub fn get_active_handler() -> Option<NeovimHandler> {
-    HANDLER_REGISTRY.lock().unwrap().clone()
-}
+pub fn get_active_handler() -> Option<NeovimHandler> { HANDLER_REGISTRY.lock().unwrap().clone() }
 
 #[cfg(target_os = "macos")]
 pub fn require_active_handler() -> NeovimHandler {
@@ -117,6 +124,139 @@ async fn ime_call(
         .await
         .map(|_| trace!("{trace_msg}"))
         .context(context)
+}
+
+/// The window and buffer that produced an absolute scroll request.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScrollTarget {
+    window: i64,
+    buffer: i64,
+}
+
+/// An absolute view position, with one-based buffer line numbers for Neovim.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScrollToRequest {
+    target: ScrollTarget,
+    topline: i64,
+    cursor_lnum: i64,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, PartialEq, Eq)]
+enum ScrollToOutcome {
+    /// No retry is needed. The view was restored or a stale target was ignored.
+    Finished,
+    /// Terminal-mode was asked to exit. Retry this buffer after the mode barrier.
+    RetryAfterTerminalExit { buffer: i64 },
+}
+
+/// Restores a view, leaving terminal input mode first when the target requires it.
+///
+/// most scrolls restores the view through `vim.fn.winrestview()` in a single
+/// request. the exception is the current window while its terminal buffer is
+/// in input mode. `stopinsert` requests a mode exit, but doesn't finish it
+/// inside that call. terminal cleanup then restores the live cursor and topline,
+/// which would overwrite a scrollback view restored too soon. an inactive terminal
+/// or one already outside input mode, needs no handoff.
+///
+/// See https://neovim.io/doc/user/insert/#%3Astopinsert
+///
+/// the first call therefore requests the exit and returns the buffer without
+/// restoring the view. `get_mode()` is the barrier before the second call:
+/// neovim defers this rpc until it is waiting for input if it isn't already.
+/// that separates the pending mode exit and cursor cleanup from the scrollback
+/// restore. this approach uses two requests plus the intervening mode request.
+///
+/// the mode response isn't polled or inspected here. the second call checks
+/// the mode again before restoring the view. if it requests another terminal
+/// exit, this fn returns an error rather than retrying indefinitely.
+///
+/// the serial executor awaits this whole operation as one [`SerialCommand::ScrollTo`].
+/// later keyboard and scroll commands on the same route stay queued until the
+/// handoff finishes. putting the retry back on the queue would let those commands
+/// run between the exit and the restore. this ordering doesn't lock neovim or
+/// prevent autocommands and other clients from changing state, so it doesn't
+/// replace the target checks.
+#[cfg(target_os = "macos")]
+async fn scroll_to_call(nvim: &Neovim<NeovimWriter>, request: ScrollToRequest) -> Result<()> {
+    trace!("ScrollTo execute {request:?}");
+    let ScrollToOutcome::RetryAfterTerminalExit { buffer } =
+        scroll_to_request(nvim, request).await?
+    else {
+        return Ok(());
+    };
+
+    // terminal-mode restores the live cursor when it exits so we wait for that work
+    // before restoring the scrollback view without releasing the serial queue.
+    nvim.get_mode().await.context("Waiting for terminal to leave input mode failed")?;
+    let retry = ScrollToRequest { target: ScrollTarget { buffer, ..request.target }, ..request };
+    match scroll_to_request(nvim, retry).await? {
+        ScrollToOutcome::Finished => Ok(()),
+        ScrollToOutcome::RetryAfterTerminalExit { .. } => {
+            anyhow::bail!("Terminal re-entered input mode while scrolling")
+        }
+    }
+}
+
+/// Restores the view or identifies a terminal buffer that needs a deferred retry.
+/// both attempts must still target the buffer that produced the scroll command.
+#[cfg(target_os = "macos")]
+async fn scroll_to_request(
+    nvim: &Neovim<NeovimWriter>,
+    request: ScrollToRequest,
+) -> Result<ScrollToOutcome> {
+    const SCROLL_TO_LUA: &str = indoc! {"
+        local win, topline, cursor_lnum, expected_buffer = ...
+        if not vim.api.nvim_win_is_valid(win) then
+          return
+        end
+        local buffer = vim.api.nvim_win_get_buf(win)
+        if buffer ~= expected_buffer then
+          return
+        end
+        if win == vim.api.nvim_get_current_win()
+            and vim.bo[buffer].buftype == 'terminal'
+            and vim.api.nvim_get_mode().mode == 't' then
+          vim.cmd('stopinsert')
+          return buffer
+        end
+        vim.api.nvim_win_call(win, function()
+          local view = vim.fn.winsaveview()
+          view.topline = topline
+          view.lnum = cursor_lnum
+          vim.fn.winrestview(view)
+          vim.api.nvim__redraw({
+            win = win,
+            cursor = true,
+            flush = true,
+          })
+        end)
+    "};
+
+    let args = call_args![
+        request.target.window,
+        request.topline,
+        request.cursor_lnum,
+        request.target.buffer,
+    ];
+
+    #[cfg(feature = "profiling")]
+    let rpc_start = std::time::Instant::now();
+
+    let result = nvim.exec_lua(SCROLL_TO_LUA, args).await;
+
+    #[cfg(feature = "profiling")]
+    scroll_to_exec_lua_latency(rpc_start.elapsed());
+
+    let result = result.context("ScrollTo failed")?;
+    if result.is_nil() {
+        Ok(ScrollToOutcome::Finished)
+    } else {
+        let buffer = result.as_i64().context("ScrollTo returned an invalid terminal buffer")?;
+        Ok(ScrollToOutcome::RetryAfterTerminalExit { buffer })
+    }
 }
 
 async fn scroll_call(
@@ -187,6 +327,13 @@ pub enum SerialCommand {
         modifier_string: String,
     },
     #[cfg(target_os = "macos")]
+    ScrollTo {
+        window: i64,
+        buffer: i64,
+        topline: i64,
+        cursor_lnum: i64,
+    },
+    #[cfg(target_os = "macos")]
     ForceClickCommand,
 }
 
@@ -248,6 +395,23 @@ impl SerialCommand {
                 None
             }
             (_, other) => Some(other),
+        }
+    }
+
+    /// Replaces a queued position only for the same buffer in the same window.
+    /// Other targets, wheel ticks and keyboard input remain ordering barriers.
+    #[cfg(target_os = "macos")]
+    fn try_merge_scroll_to(&mut self, next: Self) -> Option<Self> {
+        if matches!((&*self, &next),
+            (
+                Self::ScrollTo { window, buffer, .. },
+                Self::ScrollTo { window: next_window, buffer: next_buffer, .. },
+            ) if window == next_window && buffer == next_buffer)
+        {
+            *self = next;
+            None
+        } else {
+            Some(next)
         }
     }
 
@@ -342,6 +506,15 @@ impl SerialCommand {
                 )
                 .await
                 .context("Mouse Drag Failed"),
+            #[cfg(target_os = "macos")]
+            SerialCommand::ScrollTo { window, buffer, topline, cursor_lnum } => {
+                let request = ScrollToRequest {
+                    target: ScrollTarget { window, buffer },
+                    topline,
+                    cursor_lnum,
+                };
+                scroll_to_call(nvim, request).await
+            }
             #[cfg(target_os = "macos")]
             SerialCommand::ForceClickCommand => {
                 nvim.command("NeovideForceClick").await.context("Force click command failed")
@@ -575,15 +748,11 @@ pub enum UiCommand {
 }
 
 impl From<SerialCommand> for UiCommand {
-    fn from(serial: SerialCommand) -> Self {
-        UiCommand::Serial(serial)
-    }
+    fn from(serial: SerialCommand) -> Self { UiCommand::Serial(serial) }
 }
 
 impl From<ParallelCommand> for UiCommand {
-    fn from(parallel: ParallelCommand) -> Self {
-        UiCommand::Parallel(parallel)
-    }
+    fn from(parallel: ParallelCommand) -> Self { UiCommand::Parallel(parallel) }
 }
 
 impl AsRef<str> for UiCommand {
@@ -656,6 +825,16 @@ pub fn start_ui_command_handler(
                 },
             };
 
+            #[cfg(target_os = "macos")]
+            if matches!(serial_command, SerialCommand::ScrollTo { .. }) {
+                while let Ok(next_command) = serial_rx.try_recv() {
+                    if let Some(other) = serial_command.try_merge_scroll_to(next_command) {
+                        pending_command = Some(other);
+                        break;
+                    }
+                }
+            }
+
             if matches!(serial_command, SerialCommand::Scroll { .. }) {
                 while let Ok(next_command) = serial_rx.try_recv() {
                     if let Some(other) = serial_command.try_merge_scroll(next_command) {
@@ -684,9 +863,7 @@ pub fn start_ui_command_handler(
 }
 
 pub fn send_ui<T>(command: T, handler: &NeovimHandler)
-where
-    T: Into<UiCommand>,
-{
+where T: Into<UiCommand> {
     let command: UiCommand = command.into();
     let sender = handler.get_ui_command_channel().0;
     sender.send(command).expect("The UI command channel has not been initialized");
@@ -719,8 +896,10 @@ pub fn unregister_route_handler(route_id: RouteId) {
 
 #[cfg(test)]
 mod tests {
-    use super::{cmdheight_to_restore, normalize_file_drop_path};
     use rmpv::Value;
+
+    use super::cmdheight_to_restore;
+    use super::normalize_file_drop_path;
 
     #[test]
     fn normalizes_windows_file_drop_separators() {

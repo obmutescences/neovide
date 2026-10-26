@@ -1,20 +1,42 @@
-use std::{cell::RefCell, ops::Range, rc::Rc};
+use std::cell::RefCell;
+use std::ops::Range;
+use std::rc::Rc;
 
-use skia_safe::{
-    BlendMode, Canvas, Color, Color4f, Matrix, Paint, Path, PathBuilder, Picture, PictureRecorder,
-    Rect,
-};
+use skia_safe::BlendMode;
+use skia_safe::Canvas;
+use skia_safe::Color;
+use skia_safe::Color4f;
+use skia_safe::Matrix;
+use skia_safe::Paint;
+use skia_safe::Path;
+use skia_safe::PathBuilder;
+use skia_safe::Picture;
+use skia_safe::PictureRecorder;
+use skia_safe::Rect;
 
-use crate::{
-    bridge::WindowAnchor,
-    cmd_line::CmdLineSettings,
-    editor::{AnchorInfo, Line, LineFragment, SortOrder, WindowType},
-    profiling::{tracy_plot, tracy_zone},
-    renderer::{GridRenderer, RendererSettings, animation_utils::*, window_transition},
-    settings::Settings,
-    units::{GridPos, GridRect, GridScale, GridSize, PixelPos, PixelRect, PixelVec, to_skia_rect},
-    utils::RingBuffer,
-};
+use crate::bridge::WindowAnchor;
+use crate::cmd_line::CmdLineSettings;
+use crate::editor::AnchorInfo;
+use crate::editor::Line;
+use crate::editor::LineFragment;
+use crate::editor::SortOrder;
+use crate::editor::WindowType;
+use crate::profiling::tracy_plot;
+use crate::profiling::tracy_zone;
+use crate::renderer::GridRenderer;
+use crate::renderer::RendererSettings;
+use crate::renderer::animation_utils::*;
+use crate::renderer::window_transition;
+use crate::settings::Settings;
+use crate::units::GridPos;
+use crate::units::GridRect;
+use crate::units::GridScale;
+use crate::units::GridSize;
+use crate::units::PixelPos;
+use crate::units::PixelRect;
+use crate::units::PixelVec;
+use crate::units::to_skia_rect;
+use crate::utils::RingBuffer;
 
 pub const BASE_GRID_ID: u64 = 1;
 pub const NO_MULTIGRID_GRID_ID: u64 = 0;
@@ -113,14 +135,10 @@ impl CachedBackgroundRuns {
         self.runs.push(BackgroundRun { start_cell: cells.start, end_cell: cells.end, color });
     }
 
-    fn iter(&self) -> impl Iterator<Item = &BackgroundRun> {
-        self.runs.iter()
-    }
+    fn iter(&self) -> impl Iterator<Item = &BackgroundRun> { self.runs.iter() }
 
     #[cfg(test)]
-    fn len(&self) -> usize {
-        self.runs.len()
-    }
+    fn len(&self) -> usize { self.runs.len() }
 }
 
 pub struct RenderedWindow {
@@ -147,7 +165,6 @@ pub struct RenderedWindow {
 
     pub(crate) transition: window_transition::WindowTransition,
 }
-
 #[derive(Clone, Debug)]
 pub struct WindowDrawDetails {
     pub id: u64,
@@ -660,7 +677,6 @@ impl RenderedWindow {
         let scroll_offset = scroll_offset_lines - self.scroll_animation.position;
         (scroll_offset * line_height).round()
     }
-
     fn line_for_row(&self, row: u32) -> Option<Rc<RefCell<RenderedLine>>> {
         if self.actual_lines.is_empty() {
             return None;
@@ -1141,9 +1157,7 @@ impl BackgroundFills {
         self.rects.push(BackgroundFillRect { rect, color });
     }
 
-    fn extend(&mut self, fills: Self) {
-        self.rects.extend(fills.rects);
-    }
+    fn extend(&mut self, fills: Self) { self.rects.extend(fills.rects); }
 
     fn draw(&self, canvas: &Canvas, clip_region: PixelRect<f32>) {
         if self.rects.is_empty() {
@@ -1152,7 +1166,8 @@ impl BackgroundFills {
 
         let mut paint = Paint::default();
         paint.set_anti_alias(false);
-        paint.set_blend_mode(BlendMode::SrcOver);
+        // Extend the cell background without accumulating alpha over the canvas background.
+        paint.set_blend_mode(BlendMode::Src);
 
         canvas.save();
         canvas.clip_rect(to_skia_rect(&clip_region), None, false);
@@ -1262,14 +1277,12 @@ fn push_fill_rect_path(builder: &mut PathBuilder, bounds: &mut Option<Rect>, rec
 
 #[cfg(test)]
 mod tests {
-    use crate::units::PixelSize;
     use skia_safe::Color4f;
 
     use super::*;
+    use crate::units::PixelSize;
 
-    fn grid_scale() -> GridScale {
-        GridScale::new(PixelSize::new(8.0, 16.0))
-    }
+    fn grid_scale() -> GridScale { GridScale::new(PixelSize::new(8.0, 16.0)) }
 
     fn rendered_window() -> RenderedWindow {
         let mut window = RenderedWindow::new(BASE_GRID_ID);

@@ -20,11 +20,10 @@ mod clipboard;
 mod cmd_line;
 mod dimensions;
 mod editor;
-mod error_handling;
+mod errors;
 mod frame;
 #[cfg(target_os = "macos")]
 mod ipc;
-mod platform;
 mod profiling;
 mod renderer;
 mod running_tracker;
@@ -34,56 +33,62 @@ mod utils;
 mod version;
 mod window;
 
-#[cfg(target_os = "windows")]
-mod windows_utils;
-
-use std::{
-    env::{self, args},
-    fs::{File, OpenOptions, create_dir_all},
-    io::Write,
-    path::PathBuf,
-    process::ExitCode,
-    sync::Arc,
-    time::SystemTime,
-};
+use std::env::args;
+use std::env::{self};
+use std::fs::File;
+use std::fs::OpenOptions;
+use std::fs::create_dir_all;
+use std::io::Write;
+use std::panic::PanicHookInfo;
+use std::panic::set_hook;
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use anyhow::Result;
-use log::trace;
-use std::panic::{PanicHookInfo, set_hook};
-use time::{OffsetDateTime, macros::format_description};
-use winit::{error::EventLoopError, event_loop::EventLoopProxy};
-
-#[cfg(not(test))]
-use flexi_logger::{Cleanup, Criterion, Duplicate, FileSpec, Logger, Naming};
-
 use backtrace::Backtrace;
-use cmd_line::CmdLineSettings;
-use error_handling::handle_startup_errors;
-use renderer::{
-    RendererSettings, cursor_renderer::CursorSettings, progress_bar::ProgressBarSettings,
-};
-use version::BUILD_VERSION;
-use window::{
-    Application, EventPayload, WindowSettings, create_event_loop, determine_grid_size,
-    determine_window_size,
-};
-
 pub use channel_utils::*;
-#[cfg(target_os = "windows")]
-pub use windows_utils::*;
-
-use crate::{
-    error_handling::{StartupErrorOutput, report_startup_error},
-    settings::{Config, Settings, load_last_window_settings},
-};
-
-#[cfg(target_os = "macos")]
-use crate::utils::resolved_cwd;
-
+use cmd_line::CmdLineSettings;
+use errors::handle_startup_errors;
+#[cfg(not(test))]
+use flexi_logger::Cleanup;
+#[cfg(not(test))]
+use flexi_logger::Criterion;
+#[cfg(not(test))]
+use flexi_logger::Duplicate;
+#[cfg(not(test))]
+use flexi_logger::FileSpec;
+#[cfg(not(test))]
+use flexi_logger::Logger;
+#[cfg(not(test))]
+use flexi_logger::Naming;
+use log::trace;
 pub use profiling::startup_profiler;
+use renderer::RendererSettings;
+use renderer::cursor_renderer::CursorSettings;
+use renderer::progress_bar::ProgressBarSettings;
+use time::OffsetDateTime;
+use time::macros::format_description;
+use version::BUILD_VERSION;
+use window::Application;
+use window::EventPayload;
+use window::WindowSettings;
+use window::create_event_loop;
+use window::determine_grid_size;
+use window::determine_window_size;
+use winit::error::EventLoopError;
+use winit::event_loop::EventLoopProxy;
 
+use crate::errors::StartupErrorOutput;
+use crate::errors::report_startup_error;
 #[cfg(target_os = "macos")]
 use crate::frame::Frame;
+use crate::settings::Config;
+use crate::settings::Settings;
+use crate::settings::load_last_window_settings;
+#[cfg(target_os = "macos")]
+use crate::utils::resolved_cwd;
 
 const DEFAULT_BACKTRACES_FILE: &str = "neovide_backtraces.log";
 const BACKTRACES_FILE_ENV_VAR: &str = "NEOVIDE_BACKTRACES";
@@ -103,7 +108,7 @@ fn main() -> ExitCode {
 
     #[cfg(target_os = "windows")]
     {
-        windows_fix_dpi();
+        window::platform::configure_process_dpi();
     }
 
     // This variable is set by the AppImage runtime and causes problems for child processes

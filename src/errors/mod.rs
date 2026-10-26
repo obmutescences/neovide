@@ -1,24 +1,26 @@
-use std::{
-    io::{IsTerminal, stdout},
-    process::ExitCode,
-    sync::{Arc, Mutex},
-};
+use std::io::IsTerminal;
+use std::io::stdout;
+use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::Mutex;
 
-use anyhow::{Error, Result};
+use anyhow::Error;
+use anyhow::Result;
 use clap::error::Error as ClapError;
 use itertools::Itertools;
 use log::error;
 use winit::event_loop::EventLoop;
 
-#[cfg(target_os = "windows")]
-use crate::windows_attach_to_console;
+use crate::bridge::ParallelCommand;
+use crate::bridge::get_active_handler;
+use crate::bridge::send_ui;
+use crate::clipboard::Clipboard;
+use crate::settings::Settings;
+use crate::window::EventPayload;
+use crate::window::show_error_window;
 
-use crate::{
-    bridge::{ParallelCommand, get_active_handler, send_ui},
-    clipboard::Clipboard,
-    settings::Settings,
-    window::{EventPayload, show_error_window},
-};
+#[cfg(target_os = "windows")]
+mod windows;
 
 pub enum StartupErrorOutput {
     Stderr,
@@ -48,7 +50,7 @@ macro_rules! error_msg {
     ($($arg:tt)+) => {
         let msg = format!($($arg)+);
         log::error!("{}", msg);
-        $crate::error_handling::show_nvim_error(&msg);
+        $crate::errors::show_nvim_error(&msg);
     }
 }
 
@@ -81,7 +83,7 @@ This is the error that caused the crash. In case you don't know what to do with 
 fn handle_clap_startup_error(err: &Error) -> Option<ExitCode> {
     let clap_error = err.downcast_ref::<ClapError>()?;
     #[cfg(target_os = "windows")]
-    windows_attach_to_console();
+    windows::attach_to_console();
     let _ = clap_error.print();
     Some(ExitCode::from(clap_error.exit_code() as u8))
 }

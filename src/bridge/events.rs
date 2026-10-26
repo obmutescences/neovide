@@ -1,19 +1,24 @@
-use std::{
-    convert::TryInto,
-    error,
-    fmt::{self, Debug},
-};
+use std::convert::TryInto;
+use std::error;
+use std::fmt::Debug;
+use std::fmt::{self};
+use std::io::Cursor;
 
-use log::{debug, warn};
+use log::debug;
+use log::warn;
 use rmpv::Value;
+use rmpv::decode::read_value;
 use skia_safe::Color4f;
 use strum::AsRefStr;
 
 use super::RestartDetails;
-use crate::{
-    editor::{Colors, CursorMode, CursorShape, Style, UnderlineStyle},
-    window::{ProgressBarUpdate, UserEvent},
-};
+use crate::editor::Colors;
+use crate::editor::CursorMode;
+use crate::editor::CursorShape;
+use crate::editor::Style;
+use crate::editor::UnderlineStyle;
+use crate::window::ProgressBarUpdate;
+use crate::window::UserEvent;
 
 #[derive(Clone, Debug)]
 pub enum ParseError {
@@ -50,9 +55,7 @@ impl fmt::Display for ParseError {
 }
 
 impl error::Error for ParseError {
-    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-        None
-    }
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> { None }
 }
 
 #[derive(Clone, Debug)]
@@ -311,6 +314,7 @@ pub enum RedrawEvent {
     /// previously hidden, it should now be shown again.
     WindowPosition {
         grid: u64,
+        window: u64,
         start_row: u64,
         start_column: u64,
         width: u64,
@@ -383,6 +387,8 @@ pub enum RedrawEvent {
     /// win_viewport is received.
     WindowViewport {
         grid: u64,
+        #[allow(unused)]
+        window: u64,
         #[allow(unused)]
         top_line: f64,
         #[allow(unused)]
@@ -467,7 +473,20 @@ pub enum RedrawEvent {
     NeovimSessionStarted,
     StartupMessageUiRestored,
     NeovideSetRedraw(bool),
+    #[cfg(target_os = "macos")]
+    ScrollbarWindow {
+        window: u64,
+        metadata: Option<ScrollbarWindowMetadata>,
+    },
     NeovideIntroBannerAllowed(bool),
+}
+
+/// Buffer identity and scrollbar eligibility reported for a Neovim window.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrollbarWindowMetadata {
+    pub buffer: u64,
+    pub eligible: bool,
 }
 
 fn unpack_color(packed_color: u64) -> Color4f {
@@ -530,21 +549,25 @@ fn parse_string(string_value: Value) -> Result<String> {
     }
 }
 
-fn parse_u64(u64_value: Value) -> Result<u64> {
-    u64_value.try_into().map_err(ParseError::U64)
+fn parse_u64(u64_value: Value) -> Result<u64> { u64_value.try_into().map_err(ParseError::U64) }
+
+fn parse_handle_u64(value: Value) -> Result<u64> {
+    match value {
+        Value::Ext(_, data) => {
+            let mut cursor = Cursor::new(data);
+            let inner =
+                read_value(&mut cursor).map_err(|_| ParseError::Format("invalid handle".into()))?;
+            parse_u64(inner)
+        }
+        other => parse_u64(other),
+    }
 }
 
-fn parse_i64(i64_value: Value) -> Result<i64> {
-    i64_value.try_into().map_err(ParseError::I64)
-}
+fn parse_i64(i64_value: Value) -> Result<i64> { i64_value.try_into().map_err(ParseError::I64) }
 
-fn parse_f64(f64_value: Value) -> Result<f64> {
-    f64_value.try_into().map_err(ParseError::F64)
-}
+fn parse_f64(f64_value: Value) -> Result<f64> { f64_value.try_into().map_err(ParseError::F64) }
 
-fn parse_bool(bool_value: Value) -> Result<bool> {
-    bool_value.try_into().map_err(ParseError::Bool)
-}
+fn parse_bool(bool_value: Value) -> Result<bool> { bool_value.try_into().map_err(ParseError::Bool) }
 
 fn parse_set_title(set_title_arguments: Vec<Value>) -> Result<RedrawEvent> {
     let [title] = extract_values(set_title_arguments)?;
@@ -761,9 +784,7 @@ fn parse_hl_group_set(hl_group_set_arguments: Vec<Value>) -> Result<RedrawEvent>
 }
 
 fn parse_grid_line_cell(grid_line_cell: Value) -> Result<GridLineCell> {
-    fn take_value(val: &mut Value) -> Value {
-        std::mem::replace(val, Value::Nil)
-    }
+    fn take_value(val: &mut Value) -> Value { std::mem::replace(val, Value::Nil) }
 
     let mut cell_contents = parse_array(grid_line_cell)?;
 
@@ -856,11 +877,11 @@ fn parse_grid_scroll(grid_scroll_arguments: Vec<Value>) -> Result<RedrawEvent> {
 }
 
 fn parse_win_pos(win_pos_arguments: Vec<Value>) -> Result<RedrawEvent> {
-    let [grid, _window, start_row, start_column, width, height] =
-        extract_values(win_pos_arguments)?;
+    let [grid, window, start_row, start_column, width, height] = extract_values(win_pos_arguments)?;
 
     Ok(RedrawEvent::WindowPosition {
         grid: parse_u64(grid)?,
+        window: parse_handle_u64(window)?,
         start_row: parse_u64(start_row)?,
         start_column: parse_u64(start_column)?,
         width: parse_u64(width)?,
@@ -933,12 +954,13 @@ fn parse_msg_set_pos(msg_set_pos_arguments: Vec<Value>) -> Result<RedrawEvent> {
 
 fn parse_win_viewport(win_viewport_arguments: Vec<Value>) -> Result<RedrawEvent> {
     let (
-        [grid, _window, top_line, bottom_line, current_line, current_column],
+        [grid, window, top_line, bottom_line, current_line, current_column],
         [line_count, scroll_delta],
     ) = extract_values_with_optional(win_viewport_arguments)?;
 
     Ok(RedrawEvent::WindowViewport {
         grid: parse_u64(grid)?,
+        window: parse_handle_u64(window)?,
         top_line: parse_f64(top_line)?,
         bottom_line: parse_f64(bottom_line)?,
         current_line: parse_f64(current_line)?,
@@ -1153,9 +1175,7 @@ fn parse_progress_id(value: &Value) -> Option<String> {
         .or_else(|| value.as_u64().map(|value| value.to_string()))
 }
 
-fn parse_progress_string(value: &Value) -> Option<String> {
-    value.as_str().map(ToOwned::to_owned)
-}
+fn parse_progress_string(value: &Value) -> Option<String> { value.as_str().map(ToOwned::to_owned) }
 
 fn parse_progress_percent(value: &Value) -> Option<f32> {
     value
@@ -1181,7 +1201,9 @@ pub fn parse_progress_bar_event(value: Option<&Value>) -> Option<UserEvent> {
 mod tests {
     use rmpv::Value;
 
-    use super::{MessageKind, RedrawEvent, parse_msg_show};
+    use super::MessageKind;
+    use super::RedrawEvent;
+    use super::parse_msg_show;
 
     #[test]
     fn message_kind_marks_error_variants() {

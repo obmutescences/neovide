@@ -1,34 +1,44 @@
 use std::fmt;
-use std::sync::{
-    Arc, Mutex, RwLock,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::RwLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
-use log::{trace, warn};
-use nvim_rs::{Handler, Neovim, call_args};
+use log::trace;
+use log::warn;
+use nvim_rs::Handler;
+use nvim_rs::Neovim;
+use nvim_rs::call_args;
 use rmpv::Value;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::UnboundedSender;
 use winit::event_loop::EventLoopProxy;
 
+use super::ui_commands::UiCommand;
+use crate::LoggingReceiver;
+use crate::LoggingSender;
+use crate::bridge::GuiOption;
+use crate::bridge::NeovimWriter;
+use crate::bridge::ParallelCommand;
+use crate::bridge::RedrawEvent;
+use crate::bridge::clipboard::get_clipboard_contents;
+use crate::bridge::clipboard::set_clipboard_contents;
+use crate::bridge::events::parse_redraw_event;
+use crate::bridge::parse_progress_bar_event;
+use crate::bridge::send_ui;
+use crate::clipboard::ClipboardHandle;
+use crate::errors::ResultPanicExplanation;
+use crate::running_tracker::RunningTracker;
+use crate::settings::FontConfigState;
+use crate::settings::Settings;
+use crate::window::EventPayload;
 #[cfg(target_os = "macos")]
 use crate::window::ForceClickKind;
-use crate::{
-    LoggingReceiver, LoggingSender,
-    bridge::{
-        GuiOption, NeovimWriter, ParallelCommand, RedrawEvent,
-        clipboard::{get_clipboard_contents, set_clipboard_contents},
-        events::parse_redraw_event,
-        parse_progress_bar_event, send_ui,
-    },
-    clipboard::ClipboardHandle,
-    error_handling::ResultPanicExplanation,
-    running_tracker::RunningTracker,
-    settings::{FontConfigState, Settings},
-    window::{EventPayload, RouteId, UserEvent, WindowCommand},
-};
-
-use super::ui_commands::UiCommand;
+use crate::window::RouteId;
+use crate::window::UserEvent;
+use crate::window::WindowCommand;
 
 #[derive(Debug, PartialEq, Eq)]
 enum ClipboardRequestError {
@@ -50,9 +60,7 @@ impl fmt::Display for ClipboardRequestError {
 }
 
 impl From<ClipboardRequestError> for Value {
-    fn from(error: ClipboardRequestError) -> Self {
-        Value::from(error.to_string())
-    }
+    fn from(error: ClipboardRequestError) -> Self { Value::from(error.to_string()) }
 }
 
 fn handle_clipboard_request<T, F>(
@@ -288,6 +296,15 @@ impl Handler for NeovimHandler {
                 }
             },
             #[cfg(target_os = "macos")]
+            "neovide.scrollbar_window" => match parse_scrollbar_window_args(&arguments) {
+                Some((window, metadata)) => {
+                    self.send_redraw_event(RedrawEvent::ScrollbarWindow { window, metadata });
+                }
+                None => {
+                    warn!("neovide.scrollbar_window called with invalid arguments: {arguments:?}")
+                }
+            },
+            #[cfg(target_os = "macos")]
             "neovide.force_click" => match parse_force_click_args(&arguments) {
                 Some((col, row, entity, guifont, kind)) => {
                     self.send_window_command(WindowCommand::TouchpadPressure {
@@ -368,6 +385,24 @@ fn parse_document_state_args(arguments: &[Value]) -> Option<(String, bool)> {
     Some((path.as_str().unwrap_or("").to_string(), modified.as_bool().unwrap_or(false)))
 }
 
+#[cfg(target_os = "macos")]
+fn parse_scrollbar_window_args(
+    arguments: &[Value],
+) -> Option<(u64, Option<crate::bridge::ScrollbarWindowMetadata>)> {
+    use crate::bridge::ScrollbarWindowMetadata;
+
+    let window = arguments.first()?.as_u64().filter(|id| *id > 0)?;
+    let metadata = match arguments {
+        [_] => None,
+        [_, buffer, eligible] => Some(ScrollbarWindowMetadata {
+            buffer: buffer.as_u64().filter(|id| *id > 0)?,
+            eligible: eligible.as_bool()?,
+        }),
+        _ => return None,
+    };
+    Some((window, metadata))
+}
+
 async fn skip_default_guifont(
     event: &RedrawEvent,
     settings: &Settings,
@@ -399,13 +434,17 @@ fn is_guifont_option_set(event: &RedrawEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        panic::{AssertUnwindSafe, catch_unwind},
-        sync::{Arc, Mutex},
-    };
+    use std::panic::AssertUnwindSafe;
+    use std::panic::catch_unwind;
+    use std::sync::Arc;
+    use std::sync::Mutex;
 
-    use super::{ClipboardRequestError, handle_clipboard_request};
-    use crate::clipboard::{Clipboard, ClipboardError, ClipboardHandle, ProviderState};
+    use super::ClipboardRequestError;
+    use super::handle_clipboard_request;
+    use crate::clipboard::Clipboard;
+    use crate::clipboard::ClipboardError;
+    use crate::clipboard::ClipboardHandle;
+    use crate::clipboard::ProviderState;
 
     fn unavailable_clipboard(error: ClipboardError) -> Arc<Mutex<Clipboard>> {
         Arc::new(Mutex::new(Clipboard::from_provider_states_for_test(
